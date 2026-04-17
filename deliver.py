@@ -11,27 +11,69 @@ Output:
 Stdlib-only Python 3.10+.
 
 Usage:
-  python3 deliver.py \\
-    --client rankzero \\
-    --channel-id C0A6B2JUL7K \\
-    --channel-name rankzero-prospeqt \\
-    --brief-file /tmp/brief.txt \\
-    --transcript-file /tmp/transcript.txt \\
-    --bot-token <TG_TOKEN> \\
-    --chat-id <TG_CHAT> \\
-    --supabase-url https://xxx.supabase.co \\
+  python3 deliver.py \
+    --client rankzero \
+    --channel-id C0A6B2JUL7K \
+    --channel-name rankzero-prospeqt \
+    --brief-file /tmp/brief.txt \
+    --transcript-file /tmp/transcript.txt \
+    --bot-token <TG_TOKEN> \
+    --chat-id <TG_CHAT> \
+    --supabase-url https://xxx.supabase.co \
     --supabase-key <SERVICE_ROLE_KEY>
 """
 
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import re
+import socket
+import ssl
 import sys
-import urllib.error
-import urllib.request
+import urllib.parse
 from datetime import date, datetime, timezone
+
+
+# -- DNS pre-resolution — resolves once per hostname, reuses IP on subsequent calls --
+
+_DNS_CACHE: dict[str, str] = {}
+
+
+def _resolve(hostname: str) -> str:
+    """Resolve hostname to IPv4 address once; return cached result on subsequent calls."""
+    if hostname not in _DNS_CACHE:
+        info = socket.getaddrinfo(hostname, 443, socket.AF_INET, socket.SOCK_STREAM)
+        _DNS_CACHE[hostname] = info[0][4][0]
+    return _DNS_CACHE[hostname]
+
+
+def _https_request(
+    hostname: str,
+    method: str,
+    path: str,
+    headers: dict[str, str],
+    body: bytes | None = None,
+) -> tuple[int, str]:
+    """Make an HTTPS request using a pre-resolved IP to avoid per-request DNS lookups.
+
+    Returns (status_code, response_body_str).
+    Raises on connection-level errors (caller wraps in try/except).
+    """
+    ip = _resolve(hostname)
+    ctx = ssl.create_default_context()
+    conn = http.client.HTTPSConnection(ip, 443, context=ctx, timeout=15)
+    all_headers: dict[str, str] = {
+        "Host": hostname,
+        "User-Agent": "rankzero-daily-brief/1.0",
+    }
+    all_headers.update(headers)
+    conn.request(method, path, body=body, headers=all_headers)
+    resp = conn.getresponse()
+    body_bytes = resp.read()
+    conn.close()
+    return resp.status, body_bytes.decode("utf-8", errors="replace")
 
 
 # -- parse metadata from transcript ------------------------------------------
@@ -72,20 +114,16 @@ def parse_metadata(transcript: str) -> tuple[int, int, list[str], bool]:
 
 def send_telegram(bot_token: str, chat_id: str, text: str) -> tuple[int | None, str | None]:
     """Returns (message_id, error). message_id is None if send failed."""
+    hostname = "api.telegram.org"
+    path = f"/bot{bot_token}/sendMessage"
     body = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-        data=body,
-        headers={"Content-Type": "application/json"},
-    )
+    headers = {"Content-Type": "application/json"}
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            resp = json.loads(r.read())
-        if resp.get("ok") and resp.get("result", {}).get("message_id"):
+        status, raw = _https_request(hostname, "POST", path, headers, body)
+        resp = json.loads(raw)
+        if status == 200 and resp.get("ok") and resp.get("result", {}).get("message_id"):
             return resp["result"]["message_id"], None
-        return None, f"Telegram not-ok: {resp.get('description') or resp}"
-    except urllib.error.HTTPError as e:
-        return None, f"Telegram HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:200]}"
+        return None, f"Telegram HTTP {status}: {resp.get('description') or raw[:200]}"
     except Exception as e:
         return None, f"Telegram exception: {e}"
 
@@ -94,30 +132,22 @@ def send_telegram(bot_token: str, chat_id: str, text: str) -> tuple[int | None, 
 
 def upsert_brief(url: str, key: str, row: dict) -> tuple[dict, str | None]:
     """Returns (parsed_response, error_message). error_message is None on success."""
-    endpoint = f"{url.rstrip('/')}/rest/v1/client_briefs"
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname
+    path = parsed.path.rstrip("/") + "/rest/v1/client_briefs"
     body = json.dumps(row).encode("utf-8")
-    req = urllib.request.Request(
-        endpoint,
-        data=body,
-        headers={
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            # Explicit User-Agent: Supabase/Cloudflare blocks Python's default UA
-            # from some cloud IP ranges (HTTP 403 Cloudflare error 1010).
-            "User-Agent": "rankzero-daily-brief/1.0",
-            "Accept": "application/json",
-            "Prefer": "resolution=merge-duplicates,return=representation",
-        },
-        method="POST",
-    )
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=representation",
+    }
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            raw = r.read()
+        status, raw = _https_request(hostname, "POST", path, headers, body)
+        if status in (200, 201):
             return (json.loads(raw) if raw else {}), None
-    except urllib.error.HTTPError as e:
-        msg = e.read().decode("utf-8", "replace")[:500]
-        return {}, f"Supabase HTTP {e.code}: {msg}"
+        return {}, f"Supabase HTTP {status}: {raw[:500]}"
     except Exception as e:
         return {}, f"Supabase exception: {e}"
 
@@ -143,6 +173,10 @@ def main() -> None:
     transcript = open(args.transcript_file, encoding="utf-8").read().strip()
     if not brief:
         sys.exit(f"[ERROR] Brief file {args.brief_file} is empty")
+
+    # Pre-resolve DNS for both services upfront — single lookup per hostname
+    _resolve("api.telegram.org")
+    _resolve(urllib.parse.urlparse(args.supabase_url).hostname)
 
     # 1. Send Telegram first — capture outcome
     msg_id, tg_error = send_telegram(args.bot_token, args.chat_id, brief)
