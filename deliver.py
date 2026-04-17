@@ -92,7 +92,8 @@ def send_telegram(bot_token: str, chat_id: str, text: str) -> tuple[int | None, 
 
 # -- Supabase ----------------------------------------------------------------
 
-def upsert_brief(url: str, key: str, row: dict) -> dict:
+def upsert_brief(url: str, key: str, row: dict) -> tuple[dict, str | None]:
+    """Returns (parsed_response, error_message). error_message is None on success."""
     endpoint = f"{url.rstrip('/')}/rest/v1/client_briefs"
     body = json.dumps(row).encode("utf-8")
     req = urllib.request.Request(
@@ -113,10 +114,12 @@ def upsert_brief(url: str, key: str, row: dict) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             raw = r.read()
-            return json.loads(raw) if raw else {}
+            return (json.loads(raw) if raw else {}), None
     except urllib.error.HTTPError as e:
         msg = e.read().decode("utf-8", "replace")[:500]
-        sys.exit(f"[ERROR] Supabase HTTP {e.code}: {msg}")
+        return {}, f"Supabase HTTP {e.code}: {msg}"
+    except Exception as e:
+        return {}, f"Supabase exception: {e}"
 
 
 # -- main --------------------------------------------------------------------
@@ -148,7 +151,7 @@ def main() -> None:
     # 2. Parse metadata from transcript
     msg_count, reply_count, users, is_empty = parse_metadata(transcript)
 
-    # 3. Upsert to Supabase (always runs, even if Telegram failed)
+    # 3. Upsert to Supabase (always runs, even if Telegram failed — non-fatal)
     row = {
         "client": args.client,
         "channel_id": args.channel_id,
@@ -165,16 +168,26 @@ def main() -> None:
         "telegram_sent_at": tg_sent_at,
         "telegram_error": tg_error,
     }
-    resp = upsert_brief(args.supabase_url, args.supabase_key, row)
+    resp, sb_error = upsert_brief(args.supabase_url, args.supabase_key, row)
     row_id = resp[0].get("id") if isinstance(resp, list) and resp else "?"
 
-    # 4. Report outcome
-    tg_status = f"message_id={msg_id}" if msg_id else f"FAILED ({tg_error})"
+    # 4. Report outcome — Telegram and Supabase reported separately
+    if msg_id:
+        print(f"[OK] Telegram delivered (message_id={msg_id})")
+    else:
+        print(f"[ERROR] Telegram failed: {tg_error}")
+
+    if sb_error is None:
+        print(f"[OK] Supabase logged (id={row_id})")
+    else:
+        print(f"[WARN] Supabase failed (non-fatal): {sb_error}")
+
     print(
-        f"[OK] delivered client={args.client} supabase_id={row_id} "
-        f"telegram={tg_status} messages={msg_count} replies={reply_count} empty={is_empty}"
+        f"[OK] delivered client={args.client} messages={msg_count} "
+        f"replies={reply_count} empty={is_empty}"
     )
-    # Non-zero exit if Telegram failed but Supabase succeeded (so monitoring can flag)
+
+    # Non-zero exit only if Telegram failed (delivery is the primary goal)
     if tg_error and msg_id is None:
         sys.exit(2)
 
