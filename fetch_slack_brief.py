@@ -135,7 +135,13 @@ def main():
     messages = fetch_history(args.token, args.channel, oldest)
 
     if not messages:
-        print(f"(No messages in last {args.hours}h)")
+        empty_msg = f"(No messages in last {args.hours}h)"
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(empty_msg)
+            print(f"[OK] Wrote transcript to {args.output} (0 messages — empty channel)")
+        else:
+            print(empty_msg)
         return
 
     all_replies = {}
