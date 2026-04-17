@@ -146,11 +146,20 @@ def main():
             except SystemExit:
                 all_replies[m["ts"]] = []
 
+    # Collect user IDs from: authors, thread repliers, AND @mentions in text.
+    # Mentions matter because someone can be named in a thread without posting
+    # in the 24h window — we still want their name to resolve, not show U0XXXXX.
+    MENTION_RE = re.compile(r"<@(U[A-Z0-9]+)>")
     user_ids = {m["user"] for m in messages if m.get("user")}
+    for m in messages:
+        for uid in MENTION_RE.findall(m.get("text", "") or ""):
+            user_ids.add(uid)
     for reps in all_replies.values():
         for r in reps:
             if r.get("user"):
                 user_ids.add(r["user"])
+            for uid in MENTION_RE.findall(r.get("text", "") or ""):
+                user_ids.add(uid)
     users = build_user_map(args.token, user_ids)
 
     transcript = format_transcript(messages, users, all_replies)
