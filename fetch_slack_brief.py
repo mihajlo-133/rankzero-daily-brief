@@ -128,6 +128,7 @@ def main():
     parser.add_argument("--token", required=True, help="Slack user OAuth token (xoxp-...)")
     parser.add_argument("--channel", required=True, help="Channel ID (e.g. C0A6B2JUL7K)")
     parser.add_argument("--hours", type=int, default=24)
+    parser.add_argument("--output", help="Write transcript to this file instead of stdout")
     args = parser.parse_args()
 
     oldest = time.time() - args.hours * 3600
@@ -163,7 +164,18 @@ def main():
     users = build_user_map(args.token, user_ids)
 
     transcript = format_transcript(messages, users, all_replies)
-    print(transcript or f"(No substantive messages in last {args.hours}h)")
+    output_text = transcript or f"(No substantive messages in last {args.hours}h)"
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output_text)
+        # Print summary to stdout so the agent knows it worked
+        msg_count = transcript.count("\n[") + (1 if transcript.startswith("[") else 0)
+        reply_count = transcript.count("    └─")
+        print(f"[OK] Wrote transcript to {args.output} ({len(output_text)} chars, "
+              f"~{msg_count} top-level messages, ~{reply_count} replies)")
+    else:
+        print(output_text)
 
 
 if __name__ == "__main__":
