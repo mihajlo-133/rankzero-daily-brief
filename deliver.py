@@ -102,6 +102,10 @@ def upsert_brief(url: str, key: str, row: dict) -> dict:
             "apikey": key,
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
+            # Explicit User-Agent: Supabase/Cloudflare blocks Python's default UA
+            # from some cloud IP ranges (HTTP 403 Cloudflare error 1010).
+            "User-Agent": "rankzero-daily-brief/1.0",
+            "Accept": "application/json",
             "Prefer": "resolution=merge-duplicates,return=representation",
         },
         method="POST",
