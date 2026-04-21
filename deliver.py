@@ -63,7 +63,14 @@ def _https_request(
     """
     ip = _resolve(hostname)
     ctx = ssl.create_default_context()
-    conn = http.client.HTTPSConnection(ip, 443, context=ctx, timeout=15)
+    # Manually create the socket to the pre-resolved IP, then wrap it with
+    # SSL using server_hostname=hostname so cert validation + SNI use the
+    # correct name. Previously we passed `ip` as the HTTPSConnection host,
+    # which caused "certificate verify failed: IP address mismatch".
+    sock = socket.create_connection((ip, 443), timeout=15)
+    ssock = ctx.wrap_socket(sock, server_hostname=hostname)
+    conn = http.client.HTTPSConnection(hostname, 443, context=ctx, timeout=15)
+    conn.sock = ssock
     all_headers: dict[str, str] = {
         "Host": hostname,
         "User-Agent": "rankzero-daily-brief/1.0",
